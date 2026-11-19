@@ -122,8 +122,14 @@ if ($LASTEXITCODE -ne 0) { throw "hostcrt compile failed" }
 & $LD -m i386pe -e _main --subsystem console -o $ga "$bld\genassym.o" "$bld\hostcrt.o" $imp 2>&1 |
     Where-Object { $_ -match 'undefined|error' } | Select-Object -First 10
 if (!(Test-Path $ga)) { throw "genassym link failed" }
-$p = Start-Process -FilePath $ga -NoNewWindow -Wait -PassThru -RedirectStandardOutput "$bld\assym.s"
-if ($p.ExitCode -ne 0) { throw "genassym run failed (exit $($p.ExitCode))" }
+# M1: capture genassym output explicitly and write ASCII (no UTF-16 BOM).
+# Start-Process -RedirectStandardOutput yields an empty file under some hosts,
+# while PowerShell 5.1's ">" emits UTF-16LE which gcc rejects.
+# M1: 显式捕获输出并以 ASCII 写出（无 UTF-16 BOM）。Start-Process 的重定向在
+# 某些宿主下产出空文件，而 PowerShell 5.1 的 ">" 会写 UTF-16LE，gcc 不接受。
+$assymText = (& $ga 2>&1) -join "`n"
+if ($LASTEXITCODE -ne 0) { throw "genassym run failed (exit $LASTEXITCODE)" }
+[System.IO.File]::WriteAllText("$bld\assym.s", $assymText, [System.Text.Encoding]::ASCII)
 if (!(Test-Path "$bld\assym.s")) { throw "genassym run failed" }
 if ((Get-Item "$bld\assym.s").Length -lt 100) { throw "genassym produced no output" }
 Write-Host ("genassym: {0} bytes of assym.s" -f (Get-Item "$bld\assym.s").Length)
