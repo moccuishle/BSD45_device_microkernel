@@ -121,3 +121,8 @@ bash tools/test_s400.sh    # 故障注入验收
 TRAP）、服务可重启。剩余差距见 `docs/microkernel-design.md`：VFS 透明转发层
 （ipc_vfs.c）、tty_server、devfs_server、init supervisor、共享页大数据闭环。
 本次实现的服务化路径是这些后续工作的可运行骨架。
+
+> **S401 后续**：统一设备模型也已完成微内核化——用户态 `devfs_server` 用统一
+> `struct devobj{name, ops}` 注册表替代内核硬编码 strcmp + FD_* + switch 散射分派，
+> 客户端经 IPC 端口按"名字→句柄→统一 ops"访问，故障隔离与重启同构。详见
+> `os_device-model.md`。
