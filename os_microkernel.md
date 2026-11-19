@@ -118,9 +118,10 @@ bash tools/test_s400.sh    # 故障注入验收
 ## 5. 与微内核目标的关系
 
 本次落地了微内核最核心的四个性质：服务在用户态、IPC 会合通信、故障隔离（EIO 不
-TRAP）、服务可重启。剩余差距见 `docs/microkernel-design.md`：VFS 透明转发层
-（ipc_vfs.c）、tty_server、devfs_server、init supervisor、共享页大数据闭环。
-本次实现的服务化路径是这些后续工作的可运行骨架。
+TRAP）、服务可重启。这些服务化路径是后续工作的可运行骨架。VFS 透明转发层、
+统一设备模型（devfs_server）、共享页大数据闭环均已在 S401/S402/S403 完成
+（见下方后续段落）；尚未落地部分见 `docs/microkernel-design.md`：tty_server、
+init supervisor、物理网卡驱动上移。
 
 > **S401 后续**：统一设备模型也已完成微内核化——用户态 `devfs_server` 用统一
 > `struct devobj{name, ops}` 注册表替代内核硬编码 strcmp + FD_* + switch 散射分派，

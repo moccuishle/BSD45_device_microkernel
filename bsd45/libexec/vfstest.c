@@ -7,13 +7,16 @@
  *             VFS 透明转发到用户态 fs_server。
  *
  * 中文：与 S400 srvtest 不同，这里用标准 libc open/read/write/close（不调用
- * srv_* API），证明内核 VFS 层透明转发。内核 sys_open 识别 /srv/ 前缀→发 IPC
- * 给 fs_server→阻塞→回复回填→像普通 syscall 一样返回 fd/字节数。同时验证
- * 服务退出后 /srv/ 请求返回 EIO（故障隔离）与重启恢复。
+ * srv_* API），证明 /srv/ 转发对用户完全透明。libc 检测 /srv/ 前缀后经 IPC
+ * 发给用户态 fs_server（虚拟 fd 用 0x4000 基址），像普通 syscall 一样返回
+ * fd/字节数；内核 VFS 零改动。同时验证服务退出后 /srv/ 请求返回 EIO
+ * （故障隔离）与重启恢复。
  * EN: Unlike S400 srvtest, this uses standard libc open/read/write/close (no
- * srv_* API), proving transparent kernel VFS forwarding.  sys_open recognizes
- * /srv/ -> IPC to fs_server -> block -> reply fills in -> returns fd/count like
- * a normal syscall.  Also verifies EIO after service exit and restart recovery.
+ * srv_* API), proving the /srv/ forwarding is fully transparent to callers.
+ * libc detects the /srv/ prefix and sends IPC to the user-space fs_server
+ * (virtual fds based at 0x4000), returning fd/count like a normal syscall;
+ * the kernel VFS is untouched.  Also verifies EIO after service exit and
+ * restart recovery.
  */
 #include <stdio.h>
 #include <string.h>
