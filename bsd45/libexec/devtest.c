@@ -266,7 +266,7 @@ main(void)
 	srv = start_server();
 	if (srv < 0)
 		return (fail("fork server"));
-	delay(3000000ul);
+	delay(8000000ul);	/* 等服务 fork/exec + 注册端口（libc 增大后启动变慢）*/
 
 	/* ---- 2: 枚举统一注册表（名字空间）---- */
 	memset(buf, 0, sizeof(buf));

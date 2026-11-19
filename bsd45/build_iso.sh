@@ -72,6 +72,8 @@ for pair in "sh:bin/SH.ELF" "init:sbin/INIT.ELF" "hello:HELLO.ELF" "test:TEST.EL
             "ipctest:bin/IPCTEST.ELF" \
             "fs_server:bin/FSSRV.ELF" "srvtest:bin/SRVTEST.ELF" \
             "devfs_server:bin/DEVFS.ELF" "devtest:bin/DEVTEST.ELF" \
+            "shmtest:bin/SHMTEST.ELF" "vfstest:bin/VFSTEST.ELF" \
+            "netsrv:bin/NETSRV.ELF" "nettest:bin/NETTEST.ELF" \
             "aiotest:bin/AIOTEST.ELF" "uring:bin/uring.ELF"; do
     name="${pair%%:*}"; dst="${pair#*:}"
     [ -f "$ws/out/userland/$name.elf" ] && cp -f "$ws/out/userland/$name.elf" "$isodir/$dst"

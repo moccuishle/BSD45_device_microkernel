@@ -126,3 +126,8 @@ TRAP）、服务可重启。剩余差距见 `docs/microkernel-design.md`：VFS �
 > `struct devobj{name, ops}` 注册表替代内核硬编码 strcmp + FD_* + switch 散射分派，
 > 客户端经 IPC 端口按"名字→句柄→统一 ops"访问，故障隔离与重启同构。详见
 > `os_device-model.md`。
+>
+> **S402/S403 后续**：VFS 透明转发层（libc 层检测 `/srv/`，标准 open/read/
+> write 透明经 IPC 到 fs_server）、共享页大数据闭环（KP-7 分配→填充→提交→
+> 映射→释放）、用户态网络协议栈（UDP/IP + 环回虚拟网卡运行在用户态 netsrv）
+> 均已完成。全部用户态/libc 实现，内核零改动。详见 `os_net.md`。
