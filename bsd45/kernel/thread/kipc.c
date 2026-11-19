@@ -156,6 +156,9 @@ port_release(unsigned port)
 			slots[i].used = 0;
 	spin_unlock(&ports[port].p_lock);
 	waitq_wakeall(&ports[port].p_recvq);
+	/* 中文：S400 故障隔离——唤醒所有阻塞在该端口的用户接收者并返回 -EIO */
+	/* EN: S400 fault isolation - fail all user receivers blocked on this port */
+	ipc_fail_waiters(port);
 	return (0);
 }
 
@@ -218,53 +221,45 @@ ipc_send(unsigned port, struct ipc_msg *msg)
 }
 
 /*
- * 中文：接收一条消息。BSD45 的用户线程阻塞需要"保存 regs + 续传参数 +
- * proc_sched"的复杂协议（见 usermode.c 的 pipe 空读路径）；为避免在内核态
- * 重建这套机制，本原语采用非阻塞语义：队列空返回 -EAGAIN，调用方轮询重试；
- * 端口无属主（服务已退出）时返回 -EIO。内核线程上下文（curk != 0）则可在
- * 接收队列上真正睡眠，由 send 唤醒。
- * EN: Receive one message.  Blocking a BSD45 user thread requires the
- * "save regs + resume args + proc_sched" protocol (see the pipe empty-read
- * path in usermode.c); to avoid rebuilding that in-kernel, this primitive is
- * non-blocking for user threads: return -EAGAIN when empty and let the caller
- * poll; return -EIO if the port has no owner (service exited).  Kernel-thread
- * context (curk != 0) can genuinely sleep on the receive queue, woken by send.
+ * 中文：接收一条消息（纯非阻塞原语）。队列空返回 -EAGAIN，端口无属主返回
+ * -EIO。真正的阻塞由 usermode.c 的 SYS_IPC_RECV syscall 层完成：它在收到
+ * EAGAIN 后保存 regs、登记 uk_ipc_waiting 并 proc_sched()，由 send / 端口
+ * 释放路径投递并唤醒。分层让"队列操作"与"上下文切换"各司其职，语义清晰。
+ * EN: Receive one message (purely non-blocking).  Empty queue -> -EAGAIN,
+ * no owner -> -EIO.  Real blocking lives in the SYS_IPC_RECV syscall layer in
+ * usermode.c: on EAGAIN it saves regs, records uk_ipc_waiting and calls
+ * proc_sched(); the send / port-release path delivers and wakes.  The split
+ * keeps queue handling and context switching cleanly separated.
  */
 int
 ipc_recv(unsigned port, struct ipc_msg *msg)
 {
 	struct ipc_port *p;
 	struct ipc_slot *s;
-	int kernel_ctx;
 
 	if (port >= NPORT || msg == 0)
 		return (-EINVAL);
 	ports_init();
 	p = &ports[port];
-	kernel_ctx = (curk != 0);
 
-	for (;;) {
-		spin_lock(&p->p_lock);
-		s = p->p_qhead;
-		if (s != 0) {
-			p->p_qhead = s->next;
-			if (p->p_qhead == 0)
-				p->p_qtail = 0;
-			p->p_nmsg--;
-			spin_unlock(&p->p_lock);
-			*msg = s->m;
-			s->used = 0;
-			return (0);
-		}
-		if (p->p_owner == 0) {
-			spin_unlock(&p->p_lock);
-			return (-EIO);
-		}
+	spin_lock(&p->p_lock);
+	s = p->p_qhead;
+	if (s != 0) {
+		p->p_qhead = s->next;
+		if (p->p_qhead == 0)
+			p->p_qtail = 0;
+		p->p_nmsg--;
 		spin_unlock(&p->p_lock);
-		if (!kernel_ctx)
-			return (-EAGAIN);	/* 用户态：轮询重试 */
-		waitq_sleep(&p->p_recvq);	/* 内核线程：真正睡眠 */
+		*msg = s->m;
+		s->used = 0;
+		return (0);
 	}
+	if (p->p_owner == 0) {
+		spin_unlock(&p->p_lock);
+		return (-EIO);
+	}
+	spin_unlock(&p->p_lock);
+	return (-EAGAIN);
 }
 
 /* 中文：进程退出时关闭其所有端口并唤醒等待者 */

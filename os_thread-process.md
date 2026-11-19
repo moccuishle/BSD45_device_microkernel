@@ -395,3 +395,19 @@ monitor → "usermode" → 进入用户态跑 /sbin/init
 **进程 = `struct proc`（8 槽，持地址空间/fd/mmap/estcpu），线程 = `struct kthread`（16 槽，持内核栈与上下文）；调度单位是 TCB，地址空间单位是进程。** 内核线程靠 `kthread_spawn` 预置栈帧 + `kswitch` 换栈启动；用户线程靠 `thread_create` 分配 8 KB 独立内核栈与 2 页独立用户栈，靠 `resume_user` 的 `iret` 帧恢复；fork 用 COW 复制地址空间，exec 只换地址空间与返回帧，单线程进程整体阻塞、多线程进程只阻塞单个 TCB。
 
 两套模型的关系一句话：**用户态的"进程/线程"是这两个内核对象的投影 —— 1 个用户进程 = 1 个 `proc` + (1+n) 个 TCB；用户线程与内核线程共用同一个 16 槽 TCB 池，但只有 `proc` 在用户态可见。** 用户态看到的是 BSD 进程语义与 pthread 接口，内核看到的是"一堆 TCB + 它们各自指向的资源容器"。
+
+## 十二、S400：用户态同步原语
+
+S400 给用户态补上 mutex / condition variable（详见 `os_microkernel.md`），
+供用户态服务内部协作使用：
+
+- `pthread.h` 新增 `pthread_mutex_t` / `pthread_cond_t` 及
+  `pthread_mutex_{init,lock,trylock,unlock,destroy}`、
+  `pthread_cond_{init,wait,signal,broadcast,destroy}`
+- 实现（`libc/src/pthread.c`）基于 BSD45 的单核协作式调度：线程只在 syscall/
+  时钟 tick 让出，不会真并行，因此 mutex 用 `volatile` 状态 + `pthread_yield`
+  自旋即可正确互斥，无需内核 futex；condvar 用 generation 计数防止 signal 丢失
+- 零内核改动，纯用户态 C
+
+这是进程同步能力在用户态的最后一块——此前内核态有 S200 的 mutex/condvar，
+但用户态 `pthread.h` 只有 create/join/self/yield，服务写不了需要锁的协作逻辑。

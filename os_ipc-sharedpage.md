@@ -133,3 +133,19 @@ bash tools/run_qemu_test.sh -Keys "shell|/bin/ipctest|exit 0" -WaitFor "user exi
 
 下一步（未做）：在 usermode.c 补齐用户线程"保存 regs + 续传"的阻塞协议，
 把 pipe/wait 路径逐步改用 `block_on`，再把 tmpfs 拆成 `fs_server` 走 IPC。
+
+## 7. S400 增强：真会合阻塞与故障隔离
+
+S300 的 IPC 地基在 S400 补齐了"真会合"语义（详见 `os_microkernel.md`）：
+
+- `proc.h` 新增续传字段 `uk_ipc_waiting / uk_ipc_port / uk_ipc_msguser`
+- `SYS_IPC_RECV`：队列空且端口有 owner 时，保存 regs 到 `uk_regs`、
+  `kthread_block_tcb()` + `proc_sched()` 真正睡眠（不再是 EAGAIN 轮询）
+- `SYS_IPC_SEND`：有阻塞接收者时用 `pipe_copy` 跨进程写其用户缓冲、填
+  `uk_regs.eax=0`、`proc_wake()` 直接投递，不入队
+- `ipc_fail_waiters()`：端口释放时给所有阻塞接收者写 -EIO 并唤醒，由
+  `port_release` / `ipc_proc_exit` 调用——这就是设计文档里"服务崩溃→在飞请求
+  EIO"故障隔离契约的内核实现
+
+验证：`ipctest` 的跨进程会合（子进程先 recv 真阻塞、父进程 send 直接投递）PASS；
+`srvtest` 的服务退出后请求返回 -EIO 且内核无 TRAP PASS。

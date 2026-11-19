@@ -2032,6 +2032,65 @@ pipe_copy(unsigned pd, unsigned va, const void *kbuf, unsigned n, int touser)
 	hal_address_space_activate(save);
 }
 
+/* ==================================================================== */
+/* S400: IPC 会合（rendezvous）——用户态 recv 真正阻塞、send 直接投递      */
+/* S400: IPC rendezvous - user recv blocks, send delivers directly        */
+/* ==================================================================== */
+
+/*
+ * 中文：找到阻塞在 port 上的用户接收者并把消息写进它的用户缓冲，填好返回值后
+ * 唤醒。返回 1 表示已投递。这类接收者在 ipc_recv  syscall 里保存了
+ * uk_ipc_waiting/port/msguser 与完整 uk_regs，恢复后就像 syscall 正常返回。
+ * EN: Find a user receiver blocked on port, write the message into its user
+ * buffer, set the return value and wake it.  Returns 1 if delivered.  Such a
+ * receiver saved uk_ipc_waiting/port/msguser plus full uk_regs in the recv
+ * syscall; on resume it looks like the syscall returned normally.
+ */
+static int
+ipc_deliver_waiter(unsigned port, const struct ipc_msg *m)
+{
+	struct proc *p;
+	int i;
+
+	for (i = 0; i < NPROC; i++) {
+		p = &procs[i];
+		if (p->uk_state != P_BLOCKED || !p->uk_ipc_waiting ||
+		    p->uk_ipc_port != port)
+			continue;
+		/* 中文：在等待者页目录上下文把消息拷进它的用户缓冲 */
+		/* EN: copy the message into the waiter's user buffer under its PD */
+		pipe_copy(p->uk_pd, p->uk_ipc_msguser, m, sizeof(*m), 1);
+		p->uk_ipc_waiting = 0;
+		p->uk_regs.eax = 0;
+		proc_wake(p);
+		return (1);
+	}
+	return (0);
+}
+
+/*
+ * 中文：端口释放/服务退出时，给所有阻塞在该端口的用户接收者返回 -EIO，
+ * 实现"服务崩溃 → 在飞请求返回 EIO"的故障隔离契约。
+ * EN: On port release / service exit, fail all user receivers blocked on the
+ * port with -EIO, implementing the "service crash -> in-flight EIO" contract.
+ */
+void
+ipc_fail_waiters(unsigned port)
+{
+	struct proc *p;
+	int i;
+
+	for (i = 0; i < NPROC; i++) {
+		p = &procs[i];
+		if (p->uk_state != P_BLOCKED || !p->uk_ipc_waiting ||
+		    p->uk_ipc_port != port)
+			continue;
+		p->uk_ipc_waiting = 0;
+		p->uk_regs.eax = (unsigned)-EIO;
+		proc_wake(p);
+	}
+}
+
 /*
  * Hand pending data to a reader blocked inside read().  The copy happens in
  * the writer's context, so the reader's page directory is installed for the
@@ -5170,6 +5229,14 @@ bsd45_syscall(struct sysregs *r)
 			break;
 		}
 		bcopy((void *)r->ecx, &m, sizeof(m));
+		m.from = (unsigned)cur->uk_pid;	/* 内核填发送方 pid */
+		/* 中文：会合优先——若有人阻塞在 recv，直接投递并唤醒，不入队。
+		 * EN: rendezvous first - if someone is blocked in recv, deliver
+		 * directly and wake them, bypassing the queue. */
+		if (ipc_deliver_waiter(r->ebx, &m)) {
+			r->eax = 0;
+			break;
+		}
 		n = ipc_send(r->ebx, &m);
 		r->eax = (unsigned)n;
 		break;
@@ -5183,9 +5250,29 @@ bsd45_syscall(struct sysregs *r)
 			break;
 		}
 		n = ipc_recv(r->ebx, &m);
-		if (n == 0)
+		if (n == 0) {
 			bcopy(&m, (void *)r->ecx, sizeof(m));
-		r->eax = (unsigned)n;
+			r->eax = 0;
+			break;
+		}
+		if (n != -EAGAIN) {	/* -EIO（服务退出）等：直接返回 */
+			r->eax = (unsigned)n;
+			break;
+		}
+		/* 中文：队列空且端口有属主——真正阻塞。保存完整 syscall 上下文到
+		 * uk_regs，登记等待参数，然后调用 proc_sched 让出 CPU；发送方
+		 * 或端口释放路径会写回 uk_regs.eax 并唤醒，恢复后如 syscall 返回。
+		 * EN: empty queue with a live owner - block for real.  Save the full
+		 * syscall context in uk_regs, record wait args, then proc_sched().
+		 * The sender or port-release path writes uk_regs.eax and wakes us;
+		 * on resume it looks like the syscall returned. */
+		cur->uk_regs = *r;
+		cur->uk_ipc_waiting = 1;
+		cur->uk_ipc_port = r->ebx;
+		cur->uk_ipc_msguser = r->ecx;
+		kthread_block_tcb(0);
+		proc_sched();
+		/* 唤醒后从 uk_regs 恢复用户态，不会执行到这里 */
 		break;
 	}
 	case SYS_IPC_MAP_SHARED:	/* map_shared(pid, va, pa, prot) */

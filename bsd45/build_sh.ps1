@@ -39,6 +39,7 @@ function Prepare-Headers {
     Copy-Item (Join-Path $ws "libc\include\pthread.h") "$incu\pthread.h" -Force
     Copy-Item (Join-Path $ws "libc\include\uring.h") "$incu\uring.h" -Force
     Copy-Item (Join-Path $ws "libc\include\syscall_arch.h") "$incu\syscall_arch.h" -Force
+    Copy-Item (Join-Path $ws "libc\include\srv.h") "$incu\srv.h" -Force
     if (Test-Path (Join-Path $incu "errno.h")) { return }
     Write-Step "preparing libc header view"
     New-Item -ItemType Directory -Force -Path "$incu\sys", "$incu\machine", "$incu\net" | Out-Null
@@ -297,7 +298,7 @@ Write-Host ("built {0} ({1:N0} bytes)" -f $elf, (Get-Item $elf).Length)
 
 if ($Target -eq "sh") {
     # /bin/echo, /bin/ls: small tools linked against the same libc.
-    foreach ($tool in @("echo", "ls", "cat", "mkdir", "kill", "sleep", "rm", "cp", "mv", "wc", "grep", "head", "tail", "df", "mount", "ps", "uname", "true", "false", "date", "vmstat", "mmaptest", "subtest", "pthread", "schedtest", "pthpreempt", "aiotest", "uring", "spin", "cowtest", "crash", "badptr", "ipctest")) {
+    foreach ($tool in @("echo", "ls", "cat", "mkdir", "kill", "sleep", "rm", "cp", "mv", "wc", "grep", "head", "tail", "df", "mount", "ps", "uname", "true", "false", "date", "vmstat", "mmaptest", "subtest", "pthread", "schedtest", "pthpreempt", "aiotest", "uring", "spin", "cowtest", "crash", "badptr", "ipctest", "fs_server", "srvtest")) {
         $tobj = "$obj\$tool.o"
         if (Compile-C (Join-Path $ws "libexec\$tool.c") $tobj) {
             $tobjs = @($libobjs) + @($tobj)

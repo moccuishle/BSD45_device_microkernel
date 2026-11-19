@@ -91,6 +91,13 @@ int	ipc_send(unsigned port, struct ipc_msg *msg);
 int	ipc_recv(unsigned port, struct ipc_msg *msg);
 /* 中文：进程退出时关闭其所有端口 / Close all ports owned by an exiting process. */
 void	ipc_proc_exit(unsigned pid);
+/* 中文：S400 会合——端口释放时给所有阻塞在该端口的用户接收者返回 -EIO。
+ * 由 usermode.c 实现（它能访问 proc 表与 proc_wake），kipc.c 的 port_release
+ * 与 ipc_proc_exit 调用它完成故障隔离。
+ * EN: S400 rendezvous - on port release, fail all user receivers blocked on
+ * that port with -EIO.  Implemented in usermode.c (has proc table + proc_wake);
+ * called by kipc.c port_release / ipc_proc_exit for fault isolation. */
+void	ipc_fail_waiters(unsigned port);
 
 /* ------------------------------------------------------------------ */
 /* KP-7: 共享物理页 / shared physical pages                            */

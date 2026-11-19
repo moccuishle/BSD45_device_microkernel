@@ -156,3 +156,122 @@ sched_getprio(void)
 
 	return (sc(447, 0, 0, 0));
 }
+
+/* ==================================================================== */
+/* S400: 用户态同步原语 mutex / condition variable                       */
+/* S400: user-space mutex / condition variable                           */
+/* ==================================================================== */
+/*
+ * 中文：BSD45 是单核协作式调度，线程只在 syscall/时钟 tick 让出 CPU，不会真正
+ * 并行。因此 mutex 用 volatile 状态 + sched_yield 自旋即可正确互斥，无需内核
+ * futex。condvar 用 generation 计数防止 signal 丢失：wait 记录进入时的 gen，
+ * 释放 mutex 后 yield 直到 gen 变化或 predicate 由调用方复查。
+ * EN: BSD45 is a single-core cooperative scheduler: threads yield only at
+ * syscalls/ticks and never run truly in parallel.  A volatile flag plus
+ * sched_yield is therefore a correct mutex without a kernel futex.  The condvar
+ * uses a generation counter to avoid lost wakeups: wait snapshots gen, drops
+ * the mutex, yields until gen changes (caller rechecks its predicate).
+ */
+
+int
+pthread_mutex_init(pthread_mutex_t *m, const void *attr)
+{
+	(void)attr;
+	if (m == 0)
+		return (-1);
+	m->locked = 0;
+	return (0);
+}
+
+int
+pthread_mutex_lock(pthread_mutex_t *m)
+{
+	if (m == 0)
+		return (-1);
+	while (m->locked)
+		pthread_yield();	/* 协作式让出 / cooperative yield */
+	m->locked = 1;
+	return (0);
+}
+
+int
+pthread_mutex_trylock(pthread_mutex_t *m)
+{
+	if (m == 0)
+		return (-1);
+	if (m->locked)
+		return (1);		/* 忙碌 / busy */
+	m->locked = 1;
+	return (0);
+}
+
+int
+pthread_mutex_unlock(pthread_mutex_t *m)
+{
+	if (m == 0)
+		return (-1);
+	m->locked = 0;
+	return (0);
+}
+
+int
+pthread_mutex_destroy(pthread_mutex_t *m)
+{
+	if (m == 0 || m->locked)
+		return (-1);
+	return (0);
+}
+
+int
+pthread_cond_init(pthread_cond_t *c, const void *attr)
+{
+	(void)attr;
+	if (c == 0)
+		return (-1);
+	c->gen = 0;
+	c->waiters = 0;
+	return (0);
+}
+
+int
+pthread_cond_wait(pthread_cond_t *c, pthread_mutex_t *m)
+{
+	unsigned gen;
+
+	if (c == 0 || m == 0)
+		return (-1);
+	gen = c->gen;
+	c->waiters++;
+	pthread_mutex_unlock(m);
+	while (c->gen == gen)	/* 等 signal 递增 gen / wait for signal */
+		pthread_yield();
+	c->waiters--;
+	return (pthread_mutex_lock(m));
+}
+
+int
+pthread_cond_signal(pthread_cond_t *c)
+{
+	if (c == 0)
+		return (-1);
+	if (c->waiters > 0)
+		c->gen++;		/* 只唤醒一个语义由调用方 predicate 保证 */
+	return (0);
+}
+
+int
+pthread_cond_broadcast(pthread_cond_t *c)
+{
+	if (c == 0)
+		return (-1);
+	c->gen++;
+	return (0);
+}
+
+int
+pthread_cond_destroy(pthread_cond_t *c)
+{
+	if (c == 0 || c->waiters > 0)
+		return (-1);
+	return (0);
+}

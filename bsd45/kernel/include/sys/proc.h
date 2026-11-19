@@ -218,6 +218,18 @@ struct	proc {
 	 * charged here so a process with 100 threads does not get 100x CPU. */
 	unsigned	uk_estcpu;	/* decayed per-process CPU usage */
 	int		uk_rq_threads;	/* runnable threads this process has on the RQ */
+	/* S400: IPC rendezvous resume state.  When a user thread blocks in
+	 * ipc_recv(), we save its port + message user address here and stash the
+	 * full syscall context in uk_regs.  The sender / port-release path writes
+	 * the result into uk_regs.eax and copies the message back, then wakes the
+	 * process via proc_wake(); on resume the syscall appears to have returned.
+	 * S400: IPC 会合续传状态。用户线程在 ipc_recv 阻塞时，把端口与消息用户
+	 * 地址存这里，完整 syscall 上下文存 uk_regs。发送方/端口释放路径把结果
+	 * 写进 uk_regs.eax 并拷回消息，再经 proc_wake 唤醒；恢复时 syscall 像正常返回。
+	 */
+	int		uk_ipc_waiting;		/* nonzero: blocked in ipc_recv / nonzero:阻塞在 ipc_recv */
+	unsigned	uk_ipc_port;		/* port being waited on / 等待的端口 */
+	unsigned	uk_ipc_msguser;		/* user address of msg buffer / msg 缓冲用户地址 */
 };
 
 #define	p_session	p_pgrp->pg_session
