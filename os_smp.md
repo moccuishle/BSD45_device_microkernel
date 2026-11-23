@@ -188,10 +188,11 @@ cr2=6c6000
   金丝雀，未触发）。
 - S414 已把 `sched_esp`/`curk` 从全局改成每 CPU 一份（见 §11.1），
   「两核写坏同一个全局调度栈」这条路已排除。
-- **S417 已修复**（见 §12）：根因是 `proc_sched()` 的栈上局部 `mt`（入口
-  时的 `cur_thread` 快照）在深层调用链中被越界覆盖成页目录值；把它移到
-  per-CPU 全局 `ps_mt[MAXCPU]` 后，同负载不再复现。`smp_user_dispatch`
-  因验证样本有限仍默认 0，可手动打开演示。
+- **S417/S418 已修复**（见 §12、§13）：表面症状是 `proc_sched()` 的栈上局部
+  `mt`（`cur_thread` 入口快照）变成页目录值；S417 把它移到 per-CPU 全局
+  规避了症状。**真正根因是 S418 查明的全局运行队列无锁并发**（见 §13），
+  给 `rq_enqueue`/`rq_dequeue` 加锁后，保留栈局部 `mt` 也不再崩。两处修复
+  都保留。`smp_user_dispatch` 因验证样本有限仍默认 0，可手动打开演示。
 
 所以默认 `smp_user_dispatch = 0`。要演示多核用户调度：
 
@@ -554,3 +555,44 @@ TRAP 计数 0，系统未卡死（`echo` 有响应）。
   未稳定复现，留作后续。
 - 因验证样本仍有限，`smp_user_dispatch` **继续默认 0**；手动 `smpon`+
   `smpuser` 可用于演示。
+
+---
+
+## 13. S418：真正的根因——全局运行队列无锁（2026-11-24）
+
+`os_smp.md` §12 把 TRAP 12 归因于 `mt` 栈槽被覆盖，并用 S417（把 `mt` 移到
+per-CPU 全局）规避。这个结论**不完整**：它只让那条特定路径不再读到坏值，
+并没有消除破坏源。用户指出真正的方向——**内核多线程更新无锁链表**——经
+代码审查与对照实验证实：
+
+### 13.1 证据
+
+- `kthread.c` 的 `rq_head`/`rq_tail` 是**全局单向链表，全程无锁**；
+  `rq_enqueue()` 的 `rq_tail->t_rqnext = t; rq_tail = t;` 和 `rq_dequeue()`
+  的前驱遍历 + `rq_head`/`rq_tail` 改写都是读-改-写。
+- SMP 后这些操作来自多个核：`kthread_wake()`（line 579，`rq_enqueue`）可由
+  AP 上的 aio/softirq/管道唤醒调用；`kthread_block()`/`kthread_exit()`
+  （line 563/592，`rq_dequeue`）同样可在 AP 发生；BSP 的 `kthread_poll()`
+  也在 dequeue。两个核同时改链表 → `t_rqnext` 变成野指针、`rq_tail` 指向
+  已出队 TCB → TCB 槽被写坏 → 表现为 `cur_thread`/`mt` 变成页目录值。
+
+### 13.2 对照实验（关键）
+
+| 构建 | mt 位置 | rq 锁 | 结果 |
+|---|---|---|---|
+| 362961f | 栈局部 | 无 | 每次 `ls /bin` 必崩 TRAP 12 |
+| 实验 A | 栈局部 | **有** | 连续 7× `ls /bin` 不崩 |
+| S417 (90f3c55) | per-CPU 全局 | 无 | 混合负载不崩（只是规避了症状） |
+
+实验 A 保留了会崩的栈局部 `mt`，只加 rq 锁就不崩——**证明根因是链表竞争，
+不是栈槽本身**。而且 rq 锁加在 `kthread.c`，不改变 `proc_sched` 的栈帧布局，
+排除了"又一次布局掩盖"。
+
+### 13.3 修复
+
+`rq_enqueue()`/`rq_dequeue()` 全程持 `rq_lock`（普通自旋锁；中断处理不碰
+该队列，`sched_tick` 只读抢占状态，故无需关中断）。`t_onrq` 幂等检查和
+`uk_rq_threads` 记账一并移入临界区。S417 的 per-CPU `ps_mt` 保留作防御。
+
+最终版（S417 + rq 锁）在 VMware 8vCPU 上 `smpon`+`smpuser`+shell，
+`ls`/`cat`/`ps`/`date`/`uname` 混合负载连续通过，TRAP=0。
