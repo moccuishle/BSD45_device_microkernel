@@ -187,11 +187,11 @@ cr2=6c6000
   回收并验证 `alloc slot` 不再撞车）、内核栈溢出（已加 `KSTACK_CANARY`
   金丝雀，未触发）。
 - S414 已把 `sched_esp`/`curk` 从全局改成每 CPU 一份（见 §11.1），
-  「两核写坏同一个全局调度栈」这条路已排除；崩溃仍在，但对栈帧布局极
-  敏感——加上一段只读诊断代码后即稳定通过 20+ 次 fork/exec，去掉又复现。
-  结论：`proc_sched()` 的栈上局部 `mt`（= 入口时的 `cur_thread` 快照）在
-  循环中被越界写覆盖，根因尚未精确定位（候选：某条深层调用链的栈溢出，
-  或 kswitch 换栈窗口）。`smp_user_dispatch` 因此仍默认 0。
+  「两核写坏同一个全局调度栈」这条路已排除。
+- **S417 已修复**（见 §12）：根因是 `proc_sched()` 的栈上局部 `mt`（入口
+  时的 `cur_thread` 快照）在深层调用链中被越界覆盖成页目录值；把它移到
+  per-CPU 全局 `ps_mt[MAXCPU]` 后，同负载不再复现。`smp_user_dispatch`
+  因验证样本有限仍默认 0，可手动打开演示。
 
 所以默认 `smp_user_dispatch = 0`。要演示多核用户调度：
 
@@ -477,9 +477,10 @@ S414 的 `IPI_PROLOGUE` 现在保存 `ds/es`、切到内核段 0x10、返回时�
 加了 `t_ksp` 范围断言，`proc_sched()` 入口加了 `cur_thread` 合法性断言，
 循环末尾加了栈帧诊断。**这些断言全部为 0**——崩溃时 `mt` 在入口是合法的，
 是循环运行中被写坏的。加上循环末尾那段只读诊断后，同一负载连续 20+ 次
-fork/exec 不再复现 TRAP，说明故障对栈帧布局敏感（典型越界写 / 栈切换窗口），
-但根因尚未定位，不能宣称已修复。保留诊断作为哨兵。**`smp_user_dispatch`
-继续默认 0**；多核用户调度仍需手动 `smpon` + `smpuser`。
+fork/exec 不再复现 TRAP，说明故障对栈帧布局敏感。**S417 随后定位并修复
+了这条 TRAP（见 §12）**：`mt` 栈槽被深层调用覆盖，改为 per-CPU 全局。
+该诊断块在 S417 里已移除。`smp_user_dispatch` 因验证样本有限继续默认 0；
+多核用户调度仍需手动 `smpon` + `smpuser`。
 
 ### 11.4 S415：SMT / cache 亲和性
 
@@ -505,3 +506,51 @@ S415 补上放置侧：
 - `smpuser` + `shell` 下 `ls /bin`、`cat /readme.txt`、`date`、`ps`、`uname`
   反复执行，TRAP / 栈诊断计数均为 0，`smp_print` 显示多个 CPU 都有切换；
 - 默认（不敲 `smpon`）仍为纯单核，与 S412 之前行为一致。
+
+---
+
+## 12. S417：TRAP 12 诊断收尾与修复（2026-11-24）
+
+### 12.1 诊断过程（关键证据）
+
+S414 留下的问题：`smpon`+`smpuser` 后，BSP 在 `proc_sched()` 循环末尾读
+`mt->t_state` 时崩，`mt=0x6c6000`（页目录），`esp` 打印成 `fef001e0`
+（TCB 池）。S417 用一系列**不占被怀疑栈帧**的探针定位：
+
+1. **切栈环形日志**（`hal_switch_stack` 里写 .bss）：崩溃全程只有 2 次
+   kswitch，都是 cpu0 切进 softirq/aio（`fc00bda0 → fc003fec/fc007fec`），
+   **没有任何一次切到 TCB 池**。排除「kswitch 恢复错栈」。
+2. **trap 内读真实 esp**：`trap runs on esp=fc00bd90 frame=fc00bdbc`，
+   都在合法栈池；打印出的 `tf_esp=fef001e0 / ss=0` 是 `pushal` 的 esp 槽
+   保留的旧值（x86 PUSHA 的 esp 槽怪癖），**不是崩溃时的真实栈**。排除
+   「栈跳进 TCB 池」。
+3. **反汇编定位**：崩溃指令 `cmpl $0x1,(%eax)`，`eax` 来自 `0x10(%esp)`
+   ——即 `mt` 这个**栈上局部变量**。全函数体里 `0x10(%esp)` 只读不写，
+   但相邻的 `me`（`0x14(%esp)`）崩溃时仍是合法 proc 指针 `fb000000`。
+   只有 `mt` 这一个槽被写成页目录值 = 精确的栈槽覆盖，不是整体栈错位。
+4. **布局敏感性**：任何加进 `proc_sched()` 的探针（哪怕只是一句读 esp）
+   都让崩溃消失——典型的栈局部被深层调用链越界写覆盖的确证。
+
+### 12.2 修复
+
+`mt` 是「调用调度器的那个 TCB」，作用范围覆盖整个 for 循环，却在循环里
+经历 `sig_deliver` / `resume_user`(iret) / syscall 重入等深层调用。把它从
+栈局部移到 **per-CPU 全局** `ps_mt[MAXCPU]`：入口与断言分支各写一次，
+循环顶端 `mt = ps_mt[cid]` 重新加载。栈上的副本不再作为权威来源，即使
+该槽被覆盖也不影响调度。语义与原代码一致（原本 `mt` 也是入口快照，
+循环内不更新）。
+
+### 12.3 验证
+
+同样的 VMware 8 vCPU / `smpon`+`smpuser`+shell 流程，**修复前每次必崩**，
+修复后连续 `ls /bin`×4 + `cat`/`ps`/`date`/`uname` 混合负载全部通过，
+TRAP 计数 0，系统未卡死（`echo` 有响应）。
+
+### 12.4 仍存的次要问题
+
+- 多核 idle 时 `smp_print()` 与用户命令的串口输出会字符交错
+  （`printf` 有 `console_lock`，但用户态 `write` 走另一条路径）。
+- 高负载下观察到一次系统无响应，疑似 `console_lock` 在中断上下文自锁；
+  未稳定复现，留作后续。
+- 因验证样本仍有限，`smp_user_dispatch` **继续默认 0**；手动 `smpon`+
+  `smpuser` 可用于演示。
